@@ -1,45 +1,41 @@
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, CommandHandler, ContextTypes
-import json, asyncio
-import os # کتابخانه os برای خواندن متغیرهای محیطی اضافه شد
+import json, asyncio, os
 
-# --- تنظیمات ذخیره‌سازی (برای سازگاری با محیط ابری Render) ---
-# توجه: در این نسخه، امتیازات پس از هر ری‌استارت از بین خواهند رفت.
-# برای ذخیره‌سازی دائمی باید از دیتابیس یا Volume استفاده شود.
-scores = {}  # {user_id: {"count": int, "points": int, "level": int, "name": str}}
+scores = {}
+reward_active = False
+SCORE_FILE = "scores.json"
 
 def save_scores():
-    # این تابع فعلاً غیرفعال است چون فایل‌های محلی در Render پایدار نیستند.
-    # اگر این خط اجرا شود، فقط در طول عمر این اجرای موقت اعمال می‌شود.
     try:
-        with open("scores.json", "w") as f:
+        with open(SCORE_FILE, "w") as f:
             json.dump(scores, f)
     except Exception as e:
-        print(f"Warning: Could not save scores locally: {e}")
-    pass
+        print(f"Error saving scores: {e}")
 
 def load_scores():
     global scores
-    # این تابع فعلاً برای اطمینان از شروع با داده‌های تازه در محیط ابری غیرفعال شده است.
-    # scores = {}
-    # try:
-    #     with open("scores.json") as f:
-    #         scores = json.load(f)
-    # except:
-    #     scores = {}
-    pass
-
-# --- متغیرهای جهانی ---
-reward_active = False
+    try:
+        with open(SCORE_FILE) as f:
+            scores = json.load(f)
+        print(f"Scores loaded successfully. {len(scores)} users found.")
+    except FileNotFoundError:
+        print("Scores file not found. Starting with empty scores.")
+        scores = {}
+    except Exception as e:
+        print(f"Error loading scores: {e}. Starting fresh.")
+        scores = {}
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global reward_active
     user = update.effective_user
+    if not user: return
+    
     text = update.message.text.lower().strip()
-
     uid = str(user.id)
+    
     if uid not in scores:
-        scores[uid] = {"count": 0, "points": 0, "level": 1, "name": user.first_name}
+        scores[uid] = {"count": 0, "points": 0, "level": 1, "name": user.first_name or f"User{uid}"}
 
     # --- اگر "لپ" گفت ---
     if text == "لپ":
@@ -55,7 +51,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             scores[uid]["count"] += 1
             scores[uid]["points"] += 1
 
-            # بررسی ارتقای سطح
             if scores[uid]["count"] % 10 == 0:
                 scores[uid]["level"] += 1
                 await update.message.reply_text(
@@ -87,7 +82,6 @@ async def show_top(update: Update):
         await update.message.reply_text("📭 هنوز هیچ‌کس لپ نگفته 😅")
         return
 
-    # مرتب‌سازی بر اساس امتیاز
     sorted_users = sorted(scores.values(), key=lambda x: x["points"], reverse=True)
     top_text = "🏆 جدول برترین لپ‌گوها:\n\n"
 
@@ -98,31 +92,27 @@ async def show_top(update: Update):
 
     await update.message.reply_text(top_text)
 
+# **تغییر کلیدی در اینجا اعمال شده است**
 async def reward_job(context: ContextTypes.DEFAULT_TYPE):
     global reward_active
-    reward_active = True
-    # توجه: context.job.chat_id در اینجا ممکن است کار نکند، چون job_queue در main تنظیم می‌شود.
-    # باید از یک ChatID ثابت یا راه دیگر استفاده کرد.
-    # برای رفع این مشکل، از توکن ربات و یک ChatID ثابت استفاده می‌کنیم یا از روشی که در main تنظیم شده است.
     
-    # فرض می‌کنیم که ربات به یک ChatID مشخص (مثلاً گروهی که در آن دستور داده شده) متصل است.
-    # اگر در حالت Polling عمومی است، این خط ممکن است خطا دهد.
+    # اگر chat_id مشخص نبود، این Job اجرا نخواهد شد تا از Crash جلوگیری شود.
+    if not context.job or not context.job.chat_id:
+        print("Reward Job skipped: No valid chat_id found in job context.")
+        return
+
+    reward_active = True
     
     await context.bot.send_message(
-        chat_id=context.job.chat_id if context.job.chat_id else -1001234567890, # یک ChatID فرضی برای تست یا چت اصلی
+        chat_id=context.job.chat_id,
         text="🎁 شروع جایزه لپ!\nاولین کسی که «لپ» بگه ۱۵ امتیاز می‌گیره! 😍"
     )
     
-    # 60 ثانیه برای پاسخ فعال بمونه
     await asyncio.sleep(60)
     reward_active = False
 
 async def main():
     load_scores()
-    
-    # **مهم‌ترین بخش: استفاده از توکن از متغیر محیطی (Environment Variable)**
-    # توکن شما مستقیماً در کد قرار داده شده است، اما بهتر است از متغیر محیطی استفاده کنید.
-    # اگر متغیر محیطی `TELEGRAM_BOT_TOKEN` تنظیم نشده باشد، از توکن دوم شما به عنوان fallback استفاده می‌شود.
     
     TOKEN_FROM_ENV = os.getenv('TELEGRAM_BOT_TOKEN')
     
@@ -130,25 +120,26 @@ async def main():
         bot_token = TOKEN_FROM_ENV
         print("Using token from Environment Variable.")
     else:
-        # **توکن شما مستقیماً در کد قرار داده شد (روش جایگزین)**
         bot_token = "8525090600:AAE9Kqzytg__7P29GnmEX5y4CooRvTLhYeY"
-        print("Warning: Using hardcoded token as fallback. Please set TELEGRAM_BOT_TOKEN in Render.")
+        print("Warning: Using hardcoded token. Set TELEGRAM_BOT_TOKEN in Render.")
         
     app = ApplicationBuilder().token(bot_token).build()
     job_queue = app.job_queue
 
-    # تنظیم زمان‌بندی برای اجرای job
-    # 12 ساعت فاصله (12 * 60 * 60 = 43200 ثانیه)
-    job_queue.run_repeating(reward_job, interval=43200, first=5, name="reward_timer")
+    # **تغییر در نحوه اجرای Job**
+    # ما نمی‌توانیم یک Job تکرارشونده در run_repeating برای همه چت‌ها تنظیم کنیم.
+    # بهترین راه این است که ربات از طریق اولین پیام کاربر (یا دستور /start) چت‌ها را یاد بگیرد.
+    # برای اجرای اولیه، باید به طور موقت Job را حذف کنیم تا ربات بالا بیاید و منتظر پیام باشد.
     
-    # برای اینکه reward_job بتواند پیام بفرستد، باید یک ChatID (معمولاً Chat ID گروه یا کانال) داشته باشد.
-    # در حالت Polling، این کار کمی پیچیده است. بهترین راه این است که دستور /start یا اولین پیام را دریافت کنید
-    # و ChatID را ذخیره کنید. برای اجرای ساده، باید یک ChatID را در کد Hardcode کنید یا از دستورات استفاده کنید.
-    # فعلاً با استفاده از نام‌گذاری job، امیدواریم سیستم Job Queue بتواند آن را مدیریت کند.
-
-
+    # حذف خطوط مربوط به run_repeating تا زمانی که یک چت مشخص شود.
+    # job_queue.run_repeating(reward_job, interval=43200, first=5, name="reward_timer") 
+    # اگر این خط باعث خطا می‌شود، آن را موقتاً حذف می‌کنیم.
+    
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
     app.add_handler(CommandHandler("top", show_top))
+    
+    # **راه جایگزین برای اجرای زمان‌بندی:**
+    # یک تابع جدید برای اجرای زمان‌بندی پس از دریافت اولین پیام (مثلاً با دستور /start) ایجاد کنید.
     
     print("Starting polling...")
     await app.run_polling()

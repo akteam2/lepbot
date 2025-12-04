@@ -1,3 +1,8 @@
-python-telegram-bot
-SQLAlchemy
+# کتابخانه اصلی تلگرام با نسخه پایدار قبلی
+python-telegram-bot==20.3
+
+# برای اتصال دیتابیس به PostgreSQL
 psycopg2-binary
+
+# ORM برای کار با دیتابیس
+SQLAlchemy

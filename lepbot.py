@@ -1,236 +1,216 @@
-import logging
+import json
 import os
 import time
-
+import pytz
+from datetime import datetime, timedelta
 from telegram import Update
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    filters,
-    ContextTypes,
-)
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# کتابخانه‌های دیتابیس (نیاز به نصب در requirements.txt)
-from sqlalchemy import create_engine, Column, Integer, String, Float
-from sqlalchemy.orm import sessionmaker, declarative_base
-from sqlalchemy.exc import SQLAlchemyError
+# =====================================================================
+# ⚙️ تنظیمات ثابت
+# =====================================================================
 
-# --- تنظیمات اولیه و پیکربندی ---
+COIN_GAIN_INTERVAL = timedelta(minutes=5)
+COIN_GAIN_AMOUNT = 1
+PERIODIC_PRIZE_INTERVAL = timedelta(minutes=30)
+PERIODIC_PRIZE_AMOUNT = 20
+MAX_LEVEL = 60
 
-# 1. خواندن توکن و URL اتصال از متغیرهای محیطی
-TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '8525090600:AAE9Kqzytg__7P29GnmEX5y4CooRvTLhYeY') # Fallback
-DATABASE_URL = os.getenv('DATABASE_URL') # این URL باید توسط Render برای سرویس 'lepbot-db' فراهم شود.
+RANKS = [
+    "فرزاد(بدون فرم)ولگرد",
+    "فرزاد فمبوی سرباز",
+    "فرزاد فمبوی شوالیه",
+    "فرزاد فمبوی فرمانده",
+    "فرزاد فمبوی فرمانده کل فرقه",
+    "فرزاد فمبوی فرمانروا فرقه",
+    "فرزاد فمبوی فرمانروا قاره",
+    "فرزاد فمبوی پادشاه زمین سکای",
+    "فرزاد فمبوی تجسم فمبوی ساما",
+    "فرزاد فمبوی ساما حقیقی",
+    "فرزاد فمبوی ساما مطلق",
+    "فرزاد فمبوی گاد گی",
+    "فرزاد فمبوی ابر گاد گی",
+    "فرزاد فمبوی مقدس یونیورس گاد گی"
+]
 
-REWARD_INTERVAL_SECONDS = 43200  # 12 ساعت
-DEFAULT_SCORE = 100
+DATA_FILE = "users.json"
+user_data = {}
 
-# تنظیمات لاگ
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
-)
-logger = logging.getLogger(__name__)
+# =====================================================================
+# 💾 ذخیره و لود دیتابیس
+# =====================================================================
 
-# --- تنظیمات دیتابیس SQLAlchemy ---
-Base = declarative_base()
-
-class Score(Base):
-    """مدل دیتابیس برای ذخیره امتیازات."""
-    __tablename__ = 'scores'
-    chat_id = Column(Integer, primary_key=True)
-    username = Column(String)
-    score = Column(Integer, default=DEFAULT_SCORE)
-    last_reward_time = Column(Float, default=time.time())
-
-    def __repr__(self):
-        return f"<Score(chat_id={self.chat_id}, score={self.score})>"
-
-# اتصال به دیتابیس
-if not DATABASE_URL:
-    logger.error("FATAL: DATABASE_URL environment variable is not set. Using in-memory SQLite for testing only!")
-    # اگر URL تنظیم نشده باشد، برای جلوگیری از کرش، از SQLite موقت استفاده می‌کنیم.
-    engine = create_engine("sqlite:///:memory:")
-else:
-    # استفاده از URL دریافتی از Render برای PostgreSQL
-    engine = create_engine(DATABASE_URL)
-
-Session = sessionmaker(bind=engine)
-
-def initialize_db():
-    """ایجاد جداول در PostgreSQL (اگر وجود ندارند)"""
+def save_data():
     try:
-        # این خط باعث ایجاد جداول تعریف شده در Base می‌شود
-        Base.metadata.create_all(engine)
-        logger.info("Database tables ensured (PostgreSQL/SQLite).")
-    except SQLAlchemyError as e:
-        logger.error(f"Error ensuring database tables: {e}")
+        with open(DATA_FILE, "w", encoding="utf-8") as f:
+            json.dump(user_data, f, ensure_ascii=False, indent=4)
+    except Exception as e:
+        print(f"❌ خطا در ذخیره اطلاعات: {e}")
 
-def get_session():
-    """برگرداندن یک سشن دیتابیس."""
-    return Session()
+def load_data():
+    global user_data
+    if os.path.exists(DATA_FILE):
+        try:
+            with open(DATA_FILE, "r", encoding="utf-8") as f:
+                user_data = json.load(f)
+        except:
+            user_data = {}
 
-# --- مدیریت Job Queue (پاداش دوره‌ای) ---
+# =====================================================================
+# ⏱️ تابع امن تبدیل رشته به datetime با pytz.UTC
+# =====================================================================
 
-async def reward_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """تابعی که به صورت دوره‌ای اجرا می‌شود و امتیاز می‌دهد."""
-    chat_id = context.job.chat_id
-    
-    if chat_id is None:
-        logger.warning("Reward job executed without a chat_id. Skipping.")
+def parse_time(s):
+    dt = datetime.fromisoformat(s)
+    if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
+        dt = pytz.UTC.localize(dt)
+    return dt
+
+# =====================================================================
+# 🛡️ ضد اسپم
+# =====================================================================
+
+SPAM_TIME = 5
+SPAM_LIMIT = 8
+blocked_users = {}
+user_message_log = {}
+
+def check_spam(user_id):
+    now = time.time()
+    if user_id in blocked_users and now < blocked_users[user_id]:
+        return True
+
+    user_message_log.setdefault(user_id, [])
+    user_message_log[user_id] = [t for t in user_message_log[user_id] if now - t <= SPAM_TIME]
+    user_message_log[user_id].append(now)
+
+    if len(user_message_log[user_id]) > SPAM_LIMIT:
+        blocked_users[user_id] = now + 30
+        return "blocked"
+
+    return False
+
+# =====================================================================
+# 🎮 منطق بازی
+# =====================================================================
+
+def get_rank_and_level_info(score):
+    level = 1 + (score // 500)
+    level = min(level, MAX_LEVEL)
+    rank_index = min((level - 1) // 5, len(RANKS) - 1)
+    return level, RANKS[rank_index]
+
+def get_leaderboard_data():
+    lst = []
+    for uid, d in user_data.items():
+        level, rank = get_rank_and_level_info(d['score'])
+        lst.append({"user_id": uid, "username": d['username'], "score": d['score'], "level": level, "rank": rank})
+    return sorted(lst, key=lambda x: x['score'], reverse=True)
+
+def handle_message(message_text, user_id, username):
+    # ضد اسپم
+    spam = check_spam(user_id)
+    if spam == True:
+        return "⛔ شما موقتاً به دلیل ارسال بیش از حد پیام بلاک شده‌اید (۳۰ ثانیه)."
+    if spam == "blocked":
+        return "⚠️ خیلی سریع پیام می‌فرستی! برای ۳۰ ثانیه بلاک شدی."
+
+    # اطمینان از وجود کاربر
+    if user_id not in user_data:
+        user_data[user_id] = {
+            'score': 0,
+            'level': 1,
+            'last_coin_time': datetime(1970,1,1,tzinfo=pytz.UTC).isoformat(),
+            'last_periodic_prize_time': datetime(1970,1,1,tzinfo=pytz.UTC).isoformat(),
+            'coin_count': 0,
+            'username': username
+        }
+        save_data()
+
+    # آپدیت نام کاربری
+    user_data[user_id]['username'] = username
+    save_data()
+
+    data = user_data[user_id]
+    now = datetime.now(pytz.UTC)
+
+    # --- لپ ---
+    if message_text.lower() == "لپ":
+        last = parse_time(data['last_coin_time'])
+        if now >= last + COIN_GAIN_INTERVAL:
+            data['score'] += COIN_GAIN_AMOUNT
+            data['coin_count'] += 1
+            data['last_coin_time'] = now.isoformat()
+            save_data()
+
+            # چک لول آپ
+            new_level, new_rank = get_rank_and_level_info(data['score'])
+            if new_level != data['level']:
+                data['level'] = new_level
+                save_data()
+                return f"🎉 **لِوِل آپ!**\n🏅 مقام جدید: {new_rank}\n📈 سطح جدید: {new_level}"
+
+            return f"✔️ +{COIN_GAIN_AMOUNT} امتیاز دریافت شد! (کل لپ‌ها: {data['coin_count']})"
+        else:
+            remain = (last + COIN_GAIN_INTERVAL) - now
+            return f"⌛ لطفاً {int(remain.total_seconds()//60)} دقیقه دیگر صبر کن."
+
+    # --- وضعیت ---
+    if message_text.lower() in ["فرزاد", "لپم"]:
+        level, rank = get_rank_and_level_info(data['score'])
+        return f"📊 **وضعیت {username}:**\n💎 امتیاز: {data['score']}\n🎯 سطح: {level}\n👑 مقام: {rank}"
+
+    # --- برترین‌ها ---
+    if message_text.lower() == "برترین ها":
+        top = get_leaderboard_data()[:5]
+        t = "🏆 **برترین‌ها:**\n"
+        for i,u in enumerate(top):
+            t += f"{i+1}. {u['username']} - {u['score']} امتیاز\n"
+        return t
+
+    return "📝 دستورات: لپ | فرزاد | لپم | برترین ها"
+
+# =====================================================================
+# 🤖 تلگرام
+# =====================================================================
+
+BOT_TOKEN = "8525090600:AAFKAy7m4aoSj5esQlfTpNI-6iBCPKUuQTI"
+
+async def periodic_prize_job(context: ContextTypes.DEFAULT_TYPE):
+    now = datetime.now(pytz.UTC)
+    for uid, data in user_data.items():
+        last = parse_time(data['last_periodic_prize_time'])
+        if now >= last + PERIODIC_PRIZE_INTERVAL:
+            data['score'] += PERIODIC_PRIZE_AMOUNT
+            data['last_periodic_prize_time'] = now.isoformat()
+            save_data()
+            try:
+                await context.bot.send_message(chat_id=uid, text=f"🎉 جایزه دوره‌ای!\n+{PERIODIC_PRIZE_AMOUNT} امتیاز!")
+            except:
+                pass
+
+async def start_command(update, context):
+    await update.message.reply_text("👋 سلام! برای شروع، فقط تایپ کن: لپ")
+
+async def handle_text(update, context):
+    msg = update.message.text
+    uid = update.effective_user.id
+    username = update.effective_user.username or str(uid)
+    ans = handle_message(msg, uid, username)
+    await update.message.reply_text(ans)
+
+def main():
+    load_data()
+    if "🔴" in BOT_TOKEN:
+        print("❌ لطفاً توکن ربات واقعی خود را در متغیر BOT_TOKEN قرار دهید.")
         return
 
-    session = get_session()
-    try:
-        # یافتن کاربر
-        user = session.query(Score).filter_by(chat_id=chat_id).first()
-        
-        if not user:
-            logger.warning(f"Chat ID {chat_id} not found in DB for reward job. Skipping.")
-            return
-
-        # به‌روزرسانی امتیاز
-        user.score += 5
-        user.last_reward_time = time.time()
-        session.commit()
-
-        await context.bot.send_message(
-            chat_id=chat_id, 
-            text=f"🎁 پاداش 12 ساعته شما: 5 امتیاز اضافه شد!\nامتیاز جدید شما: {user.score}"
-        )
-        logger.info(f"Reward sent to {chat_id}. New score: {user.score}")
-
-    except SQLAlchemyError as e:
-        session.rollback()
-        logger.error(f"Error during reward job for {chat_id}: {e}")
-    finally:
-        session.close()
-
-
-# --- مدیریت پیام‌ها (Handlers) ---
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """هندلر دستور /start"""
-    chat_id = update.effective_chat.id
-    username = update.effective_user.username or update.effective_user.first_name
-    
-    session = get_session()
-    try:
-        user = session.query(Score).filter_by(chat_id=chat_id).first()
-        
-        if not user:
-            # کاربر جدید: درج در دیتابیس با امتیاز پیش‌فرض
-            new_user = Score(chat_id=chat_id, username=username, score=DEFAULT_SCORE, last_reward_time=time.time())
-            session.add(new_user)
-            session.commit()
-            message = (
-                f"سلام {username} عزیز! به ربات امتیازدهی خوش آمدید.\n"
-                f"شما با امتیاز پایه {DEFAULT_SCORE} شروع کردید.\n"
-                f"برای دریافت امتیاز، کافیست در چت‌های گروهی این ربات را تگ کنید."
-            )
-        else:
-            # کاربر قبلی: بارگذاری امتیاز موجود
-            message = (
-                f"خوش آمدید مجدد {username}!\n"
-                f"امتیاز فعلی شما: {user.score}"
-            )
-
-        await update.message.reply_text(message)
-
-        # تنظیم Job Queue برای پاداش دوره‌ای
-        current_jobs = context.job_queue.get_jobs_by_name(str(chat_id))
-        if not current_jobs:
-            context.job_queue.run_repeating(
-                reward_job, 
-                interval=timedelta(seconds=REWARD_INTERVAL_SECONDS), 
-                first=timedelta(seconds=REWARD_INTERVAL_SECONDS),
-                name=str(chat_id), 
-                chat_id=chat_id
-            )
-            logger.info(f"Reward job started for chat_id: {chat_id} with interval {REWARD_INTERVAL_SECONDS}s")
-
-    except SQLAlchemyError as e:
-        session.rollback()
-        await update.message.reply_text("خطا در دسترسی به دیتابیس هنگام اجرای /start.")
-        logger.error(f"Error in start handler: {e}")
-    finally:
-        session.close()
-
-
-async def score_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """هندلر برای شمارش امتیاز در پیام‌ها."""
-    chat_id = update.effective_chat.id
-    username = update.effective_user.username or update.effective_user.first_name
-    
-    if context.bot.username.lower() in update.message.text.lower():
-        points_to_add = 1
-        session = get_session()
-        try:
-            user = session.query(Score).filter_by(chat_id=chat_id).first()
-            
-            if user:
-                user.score += points_to_add
-                user.last_reward_time = time.time()
-                session.commit()
-                
-                await update.message.reply_text(
-                    f"✅ {username} عزیز، یک امتیاز دریافت کردید!\nامتیاز جدید شما: {user.score}",
-                    quote=True
-                )
-                logger.info(f"Score awarded to {username} ({chat_id}). New Score: {user.score}")
-            else:
-                await update.message.reply_text("خطا: امتیاز شما در سیستم یافت نشد. لطفاً دوباره دستور /start را بزنید.")
-
-        except SQLAlchemyError as e:
-            session.rollback()
-            await update.message.reply_text("خطا در به‌روزرسانی امتیاز در دیتابیس.")
-            logger.error(f"Error in score handler: {e}")
-        finally:
-            session.close()
-
-
-async def get_score(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """هندلر دستور /score برای نمایش امتیاز فعلی."""
-    chat_id = update.effective_chat.id
-    username = update.effective_user.username or update.effective_user.first_name
-    
-    session = get_session()
-    try:
-        user = session.query(Score).filter_by(chat_id=chat_id).first()
-        
-        if user:
-            await update.message.reply_text(f"امتیاز فعلی شما ({username}): {user.score}")
-        else:
-            await update.message.reply_text("شما هنوز در سیستم ثبت نشده‌اید. لطفاً دستور /start را بزنید.")
-    except SQLAlchemyError as e:
-        await update.message.reply_text("خطا در بازیابی امتیاز از دیتابیس.")
-        logger.error(f"Error in get_score handler: {e}")
-    finally:
-        session.close()
-
-
-def main() -> None:
-    """نقطه ورود اصلی ربات."""
-    
-    # 1. اطمینان از آماده بودن دیتابیس (جداول)
-    initialize_db()
-    
-    # 2. ساخت Application با توکن
-    if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN == '8525090600:AAE9Kqzytg__7P29GnmEX5y4CooRvTLhYeY':
-        logger.error("FATAL: Telegram Bot Token is missing or using fallback!")
-    
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-
-    # 3. ثبت هندلرها
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("score", get_score))
-    application.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, score_handler)
-    )
-
-    # 4. شروع پولینگ (اجرای ربات)
-    logger.info("Starting bot polling with PostgreSQL configuration...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
-
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.job_queue.run_repeating(periodic_prize_job, interval=PERIODIC_PRIZE_INTERVAL, first=5)
+    print("🤖 ربات با موفقیت اجرا شد!")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()

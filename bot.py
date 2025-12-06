@@ -2,8 +2,8 @@ import os
 import json
 import pytz
 from datetime import datetime, timedelta
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram import Update, Message, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
 # ================== تنظیمات ==================
 COIN_GAIN_INTERVAL = timedelta(minutes=5)
@@ -28,6 +28,23 @@ RANKS = [
     "فرزاد فمبوی ابر گاد گی",
     "فرزاد فمبوی مقدس یونیورس گاد گی"
 ]
+
+# ================== ماینر ==================
+MINER_LEVELS = []
+base_score = 1
+base_capacity = 30
+base_cost = 45
+for i in range(20):
+    level = i + 1
+    score = base_score * (2 ** i)
+    capacity = base_capacity * (2 ** i)
+    cost = int(base_cost * (2.2 ** i))
+    MINER_LEVELS.append({
+        "level": level,
+        "score_per_30min": score,
+        "capacity": capacity,
+        "upgrade_cost": cost
+    })
 
 DATA_FILE = "users.json"
 user_data = {}
@@ -59,7 +76,7 @@ def get_rank_and_level_info(score):
     rank_index = min((level - 1)//5, len(RANKS)-1)
     return level, RANKS[rank_index]
 
-def handle_message(message_text, user_id, username):
+def handle_message(message_text, user_id, username, reply_to: Message = None):
     if user_id not in user_data:
         user_data[user_id] = {
             "score":0,
@@ -67,6 +84,9 @@ def handle_message(message_text, user_id, username):
             "last_coin_time": datetime(1970,1,1,tzinfo=pytz.UTC).isoformat(),
             "last_periodic_prize_time": datetime(1970,1,1,tzinfo=pytz.UTC).isoformat(),
             "coin_count":0,
+            "miner_level":1,
+            "miner_storage":0,
+            "miner_last_time": datetime(1970,1,1,tzinfo=pytz.UTC).isoformat(),
             "username":username
         }
         save_data()
@@ -92,7 +112,15 @@ def handle_message(message_text, user_id, username):
     # --- وضعیت ---
     if message_text.lower() in ["فرزاد", "لپم"]:
         level, rank = get_rank_and_level_info(data['score'])
-        return f"📊 {username}: امتیاز: {data['score']}, لول: {level}, مقام: {rank}"
+        miner_lvl = data["miner_level"]
+        miner_info = MINER_LEVELS[miner_lvl-1]
+        return (
+            f"📊 {username}:\n"
+            f"امتیاز: {data['score']}\n"
+            f"لول: {level}\n"
+            f"مقام: {rank}\n"
+            f"ماینر سطح {miner_lvl}: {data['miner_storage']}/{miner_info['capacity']} امتیاز ذخیره"
+        )
 
     # --- برترین‌ها ---
     if message_text.lower() == "برترین ها":
@@ -105,7 +133,69 @@ def handle_message(message_text, user_id, username):
             text += f"{i+1}. {u['username']} - {u['score']} امتیاز\n"
         return text
 
-    return "📝 دستورات: لپ | فرزاد | لپم | برترین ها"
+    # --- ماینر ---
+    if message_text.lower() == "ماینر":
+        lvl = data["miner_level"]
+        miner = MINER_LEVELS[lvl-1]
+        last = parse_time(data["miner_last_time"])
+        elapsed = now - last
+        generated = miner["score_per_30min"] * (elapsed.total_seconds()//1800)
+        stored = min(data["miner_storage"] + generated, miner["capacity"])
+        data["miner_storage"] = stored
+        data["miner_last_time"] = now.isoformat()
+        save_data()
+
+        keyboard = [
+            [InlineKeyboardButton("برداشت پوینت‌ها", callback_data="withdraw_miner")],
+            [InlineKeyboardButton("ارتقا ماینر", callback_data="upgrade_miner")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        return f"⛏️ ماینر سطح {lvl}: {int(data['miner_storage'])}/{miner['capacity']} امتیاز ذخیره دارد.", reply_markup
+
+    # --- انتقال امتیاز با ریپلای ---
+    if message_text.lower().startswith("لپمو بگیر") and reply_to:
+        try:
+            parts = message_text.split()
+            amount = int(parts[-1])
+            if amount <= 0:
+                return "❌ مقدار باید مثبت باشد."
+            if data["score"] < amount:
+                return f"❌ موجودی کافی نیست! فقط {data['score']} امتیاز دارید."
+            target_id = reply_to.from_user.id
+            target_name = reply_to.from_user.username or str(target_id)
+            if target_id not in user_data:
+                user_data[target_id] = {
+                    "score":0,
+                    "level":1,
+                    "last_coin_time": datetime(1970,1,1,tzinfo=pytz.UTC).isoformat(),
+                    "last_periodic_prize_time": datetime(1970,1,1,tzinfo=pytz.UTC).isoformat(),
+                    "coin_count":0,
+                    "miner_level":1,
+                    "miner_storage":0,
+                    "miner_last_time": datetime(1970,1,1,tzinfo=pytz.UTC).isoformat(),
+                    "username":target_name
+                }
+            data["score"] -= amount
+            user_data[target_id]["score"] += amount
+            save_data()
+            return f"✅ {amount} امتیاز به {target_name} منتقل شد."
+        except:
+            return "❌ فرمت اشتباه است. مثال: لپمو بگیر ۱۰ (ریپلای روی پیام فرد مورد نظر)"
+
+    # --- نمایش دستورات فقط با 'دستورات' ---
+    if message_text.lower() == "دستورات":
+        return (
+            "📜 دستورات:\n"
+            "🔹 لپ\n"
+            "🔹 فرزاد / لپم\n"
+            "🔹 برترین ها\n"
+            "🔹 ماینر\n"
+            "🔹 ارتقا ماینر (دکمه در ماینر)\n"
+            "🔹 انتقال امتیاز با ریپلای: لپمو بگیر [عدد]"
+        )
+
+    # برای سایر ورودی‌ها هیچ پیامی ارسال نشود
+    return None
 
 # ================== JobQueue ==================
 async def periodic_prize_job(context: ContextTypes.DEFAULT_TYPE):
@@ -121,18 +211,58 @@ async def periodic_prize_job(context: ContextTypes.DEFAULT_TYPE):
             except:
                 pass
 
+# ================== Callback دکمه‌ها ==================
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    data = user_data[user_id]
+    now = datetime.now(pytz.UTC)
+
+    if query.data == "withdraw_miner":
+        lvl = data["miner_level"]
+        miner = MINER_LEVELS[lvl-1]
+        points = int(data["miner_storage"])
+        if points == 0:
+            await query.edit_message_text("❌ هیچ پوینتی برای برداشت موجود نیست.")
+        else:
+            data["score"] += points
+            data["miner_storage"] = 0
+            save_data()
+            await query.edit_message_text(f"✅ {points} امتیاز ماینر به امتیاز اصلی اضافه شد!")
+
+    elif query.data == "upgrade_miner":
+        lvl = data["miner_level"]
+        if lvl >= 20:
+            await query.edit_message_text("🔝 شما در بالاترین سطح ماینر هستید.")
+        else:
+            next_miner = MINER_LEVELS[lvl]
+            if data["score"] >= next_miner["upgrade_cost"]:
+                data["score"] -= next_miner["upgrade_cost"]
+                data["miner_level"] += 1
+                save_data()
+                await query.edit_message_text(f"✅ ماینر به سطح {lvl+1} ارتقا یافت!")
+            else:
+                await query.edit_message_text(f"❌ امتیاز کافی نیست. برای ارتقا نیاز به {next_miner['upgrade_cost']} امتیاز دارید.")
+
 # ================== تلگرام ==================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 سلام! تایپ کن: لپ")
+    await update.message.reply_text("👋 سلام! برای دیدن دستورات تایپ کن: دستورات")
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message.text
     uid = update.effective_user.id
     username = update.effective_user.username or str(uid)
-    ans = handle_message(msg, uid, username)
-    await update.message.reply_text(ans)
+    reply_msg = update.message.reply_to_message
+    ans = handle_message(msg, uid, username, reply_msg)
+    if ans:
+        if isinstance(ans, tuple):
+            text, reply_markup = ans
+            await update.message.reply_text(text, reply_markup=reply_markup)
+        else:
+            await update.message.reply_text(ans)
 
 def main():
     load_data()
@@ -143,6 +273,7 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_handler(CallbackQueryHandler(button_callback))
     app.job_queue.run_repeating(periodic_prize_job, interval=PERIODIC_PRIZE_INTERVAL, first=5)
     print("🤖 ربات اجرا شد!")
     app.run_polling(allowed_updates=Update.ALL_TYPES)

@@ -6,10 +6,14 @@ from telegram import Update, Message, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
 # ================== تنظیمات ==================
-COIN_GAIN_INTERVAL = timedelta(minutes=5)
+COIN_GAIN_INTERVAL = timedelta(minutes=5)  # لپ هر ۵ دقیقه
 COIN_GAIN_AMOUNT = 1
+
+# 🎉 پاداش دوره‌ای
 PERIODIC_PRIZE_INTERVAL = timedelta(minutes=30)
-PERIODIC_PRIZE_AMOUNT = 20
+BASE_PERIODIC_PRIZE = 2  # پاداش ثابت
+PERIODIC_PRIZE_MULTIPLIER = 1.5  # ضریب افزایشی سطح ماینر
+
 MAX_LEVEL = 60
 
 RANKS = [
@@ -29,19 +33,16 @@ RANKS = [
     "فرزاد فمبوی مقدس یونیورس گاد گی"
 ]
 
-# ================== ماینر ==================
+# ⚙️ ماینر (هر ۵ دقیقه = ۱ امتیاز)
 MINER_LEVELS = []
-base_score = 1
 base_capacity = 30
 base_cost = 45
 for i in range(20):
     level = i + 1
-    score = base_score * (2 ** i)
-    capacity = base_capacity * (2 ** i)
-    cost = int(base_cost * (2.2 ** i))
+    capacity = base_capacity * (2 ** i)  # ظرفیت بیشتر
+    cost = int(base_cost * (2.2 ** i))  # هزینه افزایش یابد
     MINER_LEVELS.append({
         "level": level,
-        "score_per_30min": score,
         "capacity": capacity,
         "upgrade_cost": cost
     })
@@ -139,24 +140,23 @@ def handle_message(message_text, user_id, username, reply_to: Message = None):
         miner = MINER_LEVELS[lvl-1]
         last = parse_time(data["miner_last_time"])
         elapsed = now - last
-        generated = miner["score_per_30min"] * (elapsed.total_seconds()//1800)
+        generated = int(elapsed.total_seconds() // 300)  # هر ۵ دقیقه
         stored = min(data["miner_storage"] + generated, miner["capacity"])
         data["miner_storage"] = stored
         data["miner_last_time"] = now.isoformat()
         save_data()
 
         keyboard = [
-            [InlineKeyboardButton("برداشت پوینت‌ها", callback_data="withdraw_miner")],
-            [InlineKeyboardButton("ارتقا ماینر", callback_data="upgrade_miner")]
+            [InlineKeyboardButton("📤 برداشت", callback_data="withdraw_miner")],
+            [InlineKeyboardButton("⏫ ارتقا ماینر", callback_data="upgrade_miner")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         return f"⛏️ ماینر سطح {lvl}: {int(data['miner_storage'])}/{miner['capacity']} امتیاز ذخیره دارد.", reply_markup
 
-    # --- انتقال امتیاز با ریپلای ---
+    # --- انتقال امتیاز ---
     if message_text.lower().startswith("لپمو بگیر") and reply_to:
         try:
-            parts = message_text.split()
-            amount = int(parts[-1])
+            amount = int(message_text.split()[-1])
             if amount <= 0:
                 return "❌ مقدار باید مثبت باشد."
             if data["score"] < amount:
@@ -182,7 +182,7 @@ def handle_message(message_text, user_id, username, reply_to: Message = None):
         except:
             return "❌ فرمت اشتباه است. مثال: لپمو بگیر ۱۰ (ریپلای روی پیام فرد مورد نظر)"
 
-    # --- نمایش دستورات فقط با 'دستورات' ---
+    # --- دستورات ---
     if message_text.lower() == "دستورات":
         return (
             "📜 دستورات:\n"
@@ -190,24 +190,23 @@ def handle_message(message_text, user_id, username, reply_to: Message = None):
             "🔹 فرزاد / لپم\n"
             "🔹 برترین ها\n"
             "🔹 ماینر\n"
-            "🔹 ارتقا ماینر (دکمه در ماینر)\n"
             "🔹 انتقال امتیاز با ریپلای: لپمو بگیر [عدد]"
         )
 
-    # برای سایر ورودی‌ها هیچ پیامی ارسال نشود
     return None
 
-# ================== JobQueue ==================
+# ================== JobQueue پاداش دوره‌ای ==================
 async def periodic_prize_job(context: ContextTypes.DEFAULT_TYPE):
     now = datetime.now(pytz.UTC)
     for uid, data in user_data.items():
         last = parse_time(data['last_periodic_prize_time'])
         if now >= last + PERIODIC_PRIZE_INTERVAL:
-            data['score'] += PERIODIC_PRIZE_AMOUNT
+            prize = int(BASE_PERIODIC_PRIZE * (PERIODIC_PRIZE_MULTIPLIER ** (data["miner_level"] - 1)))
+            data['score'] += prize
             data['last_periodic_prize_time'] = now.isoformat()
             save_data()
             try:
-                await context.bot.send_message(chat_id=uid, text=f"🎉 جایزه دوره‌ای +{PERIODIC_PRIZE_AMOUNT} امتیاز!")
+                await context.bot.send_message(chat_id=uid, text=f"🎉 جایزه دوره‌ای +{prize} امتیاز!")
             except:
                 pass
 
@@ -217,11 +216,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     user_id = query.from_user.id
     data = user_data[user_id]
-    now = datetime.now(pytz.UTC)
 
     if query.data == "withdraw_miner":
-        lvl = data["miner_level"]
-        miner = MINER_LEVELS[lvl-1]
         points = int(data["miner_storage"])
         if points == 0:
             await query.edit_message_text("❌ هیچ پوینتی برای برداشت موجود نیست.")
@@ -229,7 +225,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             data["score"] += points
             data["miner_storage"] = 0
             save_data()
-            await query.edit_message_text(f"✅ {points} امتیاز ماینر به امتیاز اصلی اضافه شد!")
+            await query.edit_message_text(f"✅ {points} امتیاز به موجودی اضافه شد!")
 
     elif query.data == "upgrade_miner":
         lvl = data["miner_level"]
@@ -241,9 +237,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 data["score"] -= next_miner["upgrade_cost"]
                 data["miner_level"] += 1
                 save_data()
-                await query.edit_message_text(f"✅ ماینر به سطح {lvl+1} ارتقا یافت!")
+                await query.edit_message_text(f"🚀 ماینر به سطح {lvl+1} ارتقا یافت!")
             else:
-                await query.edit_message_text(f"❌ امتیاز کافی نیست. برای ارتقا نیاز به {next_miner['upgrade_cost']} امتیاز دارید.")
+                await query.edit_message_text(f"❌ نیاز به {next_miner['upgrade_cost']} امتیاز برای ارتقا دارید.")
 
 # ================== تلگرام ==================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")

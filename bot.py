@@ -6,10 +6,7 @@ from datetime import datetime, timedelta
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# =====================================================================
-# ⚙️ تنظیمات ثابت
-# =====================================================================
-
+# ================== تنظیمات ثابت ==================
 COIN_GAIN_INTERVAL = timedelta(minutes=5)
 COIN_GAIN_AMOUNT = 1
 PERIODIC_PRIZE_INTERVAL = timedelta(minutes=30)
@@ -36,16 +33,10 @@ RANKS = [
 DATA_FILE = "users.json"
 user_data = {}
 
-# =====================================================================
-# 💾 ذخیره و لود دیتابیس
-# =====================================================================
-
+# ================== ذخیره و لود ==================
 def save_data():
-    try:
-        with open(DATA_FILE, "w", encoding="utf-8") as f:
-            json.dump(user_data, f, ensure_ascii=False, indent=4)
-    except Exception as e:
-        print(f"❌ خطا در ذخیره اطلاعات: {e}")
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(user_data, f, ensure_ascii=False, indent=4)
 
 def load_data():
     global user_data
@@ -56,20 +47,14 @@ def load_data():
         except:
             user_data = {}
 
-# =====================================================================
-# ⏱️ تابع امن تبدیل رشته به datetime با pytz.UTC
-# =====================================================================
-
+# ================== تبدیل رشته به datetime امن ==================
 def parse_time(s):
     dt = datetime.fromisoformat(s)
     if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
         dt = pytz.UTC.localize(dt)
     return dt
 
-# =====================================================================
-# 🛡️ ضد اسپم
-# =====================================================================
-
+# ================== ضد اسپم ==================
 SPAM_TIME = 5
 SPAM_LIMIT = 8
 blocked_users = {}
@@ -87,13 +72,9 @@ def check_spam(user_id):
     if len(user_message_log[user_id]) > SPAM_LIMIT:
         blocked_users[user_id] = now + 30
         return "blocked"
-
     return False
 
-# =====================================================================
-# 🎮 منطق بازی
-# =====================================================================
-
+# ================== منطق بازی ==================
 def get_rank_and_level_info(score):
     level = 1 + (score // 500)
     level = min(level, MAX_LEVEL)
@@ -111,11 +92,10 @@ def handle_message(message_text, user_id, username):
     # ضد اسپم
     spam = check_spam(user_id)
     if spam == True:
-        return "⛔ شما موقتاً به دلیل ارسال بیش از حد پیام بلاک شده‌اید (۳۰ ثانیه)."
+        return "⛔ شما موقتاً بلاک شده‌اید (۳۰ ثانیه)."
     if spam == "blocked":
         return "⚠️ خیلی سریع پیام می‌فرستی! برای ۳۰ ثانیه بلاک شدی."
 
-    # اطمینان از وجود کاربر
     if user_id not in user_data:
         user_data[user_id] = {
             'score': 0,
@@ -127,7 +107,6 @@ def handle_message(message_text, user_id, username):
         }
         save_data()
 
-    # آپدیت نام کاربری
     user_data[user_id]['username'] = username
     save_data()
 
@@ -142,15 +121,12 @@ def handle_message(message_text, user_id, username):
             data['coin_count'] += 1
             data['last_coin_time'] = now.isoformat()
             save_data()
-
-            # چک لول آپ
             new_level, new_rank = get_rank_and_level_info(data['score'])
             if new_level != data['level']:
                 data['level'] = new_level
                 save_data()
-                return f"🎉 **لِوِل آپ!**\n🏅 مقام جدید: {new_rank}\n📈 سطح جدید: {new_level}"
-
-            return f"✔️ +{COIN_GAIN_AMOUNT} امتیاز دریافت شد! (کل لپ‌ها: {data['coin_count']})"
+                return f"🎉 لِوِل آپ! 🏅 {new_rank}, سطح: {new_level}"
+            return f"✔️ +{COIN_GAIN_AMOUNT} امتیاز دریافت شد!"
         else:
             remain = (last + COIN_GAIN_INTERVAL) - now
             return f"⌛ لطفاً {int(remain.total_seconds()//60)} دقیقه دیگر صبر کن."
@@ -158,23 +134,20 @@ def handle_message(message_text, user_id, username):
     # --- وضعیت ---
     if message_text.lower() in ["فرزاد", "لپم"]:
         level, rank = get_rank_and_level_info(data['score'])
-        return f"📊 **وضعیت {username}:**\n💎 امتیاز: {data['score']}\n🎯 سطح: {level}\n👑 مقام: {rank}"
+        return f"📊 وضعیت {username}: 💎 {data['score']} امتیاز, 🎯 سطح: {level}, 👑 {rank}"
 
     # --- برترین‌ها ---
     if message_text.lower() == "برترین ها":
         top = get_leaderboard_data()[:5]
-        t = "🏆 **برترین‌ها:**\n"
+        t = "🏆 برترین‌ها:\n"
         for i,u in enumerate(top):
             t += f"{i+1}. {u['username']} - {u['score']} امتیاز\n"
         return t
 
     return "📝 دستورات: لپ | فرزاد | لپم | برترین ها"
 
-# =====================================================================
-# 🤖 تلگرام
-# =====================================================================
-
-BOT_TOKEN = "8525090600:AAFKAy7m4aoSj5esQlfTpNI-6iBCPKUuQTI"
+# ================== تلگرام ==================
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
 async def periodic_prize_job(context: ContextTypes.DEFAULT_TYPE):
     now = datetime.now(pytz.UTC)
@@ -185,12 +158,12 @@ async def periodic_prize_job(context: ContextTypes.DEFAULT_TYPE):
             data['last_periodic_prize_time'] = now.isoformat()
             save_data()
             try:
-                await context.bot.send_message(chat_id=uid, text=f"🎉 جایزه دوره‌ای!\n+{PERIODIC_PRIZE_AMOUNT} امتیاز!")
+                await context.bot.send_message(chat_id=uid, text=f"🎉 جایزه دوره‌ای +{PERIODIC_PRIZE_AMOUNT} امتیاز!")
             except:
                 pass
 
 async def start_command(update, context):
-    await update.message.reply_text("👋 سلام! برای شروع، فقط تایپ کن: لپ")
+    await update.message.reply_text("👋 سلام! تایپ کن: لپ")
 
 async def handle_text(update, context):
     msg = update.message.text
@@ -201,15 +174,15 @@ async def handle_text(update, context):
 
 def main():
     load_data()
-    if "🔴" in BOT_TOKEN:
-        print("❌ لطفاً توکن ربات واقعی خود را در متغیر BOT_TOKEN قرار دهید.")
+    if not BOT_TOKEN:
+        print("❌ لطفاً توکن ربات را به عنوان Environment Variable قرار دهید.")
         return
 
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.job_queue.run_repeating(periodic_prize_job, interval=PERIODIC_PRIZE_INTERVAL, first=5)
-    print("🤖 ربات با موفقیت اجرا شد!")
+    print("🤖 ربات اجرا شد!")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
